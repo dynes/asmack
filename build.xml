@@ -81,7 +81,7 @@
       target="1.6"
       srcdir="build/src/trunk"
       destdir="build/classes-@{version}/trunk"
-      bootclasspath="${sdk-location}/platforms/android-@{version}/android.jar:${jingle}"
+      classpath="${sdk-location}/platforms/android-@{version}/android.jar:${jingle}"
       debug="true"
       debuglevel="source,lines"
     />
