@@ -1,16 +1,17 @@
 #!/bin/bash
 
-fetch() {
-    echo "Fetching from ${1} to ${2}"
+svnfetch() {
+    REV="${3:-HEAD}"
+    echo "Fetching from ${1} to ${2} at revision ${REV}"
     cd $SRC_DIR
     if ! [ -f "${2}/.svn/entries" ]; then
 	mkdir "${2}"
 	cd "${2}"
-	svn co --non-interactive --trust-server-cert "${1}" "."
+	svn co --non-interactive --trust-server-cert "${1}" -r "${REV}" "."
     else
 	cd "${2}"
 	svn cleanup
-	svn up
+	svn up -r "${REV}"
     fi
 }
 
@@ -20,17 +21,35 @@ gitfetch() {
     if ! [ -f "${3}/.git/config" ]; then
 	git clone "${1}" "${3}"
 	cd "${3}"
-	git checkout origin/"${2}"
+	git checkout "${2}"
     else
 	cd "${3}"
 	git fetch
-	git checkout origin/"${2}"
+	git checkout "${2}"
     fi
 
     if [ $? -ne 0 ]; then
 	exit
     fi
 }
+
+hgfetch() {
+(
+  echo "Fetching ${2} branch from ${1} to ${3} via mercurial"
+  cd src
+  if [ -e "${2}/.hg" ] ; then
+      cd ${2}
+      hg pull
+  else
+      hg clone "${1}" "${2}"
+  fi
+  hg up -r ${3}
+)
+    if [ $? -ne 0 ]; then
+	exit
+    fi
+}
+
 
 testsmackgit() {
     cd $SRC_DIR
@@ -64,10 +83,10 @@ fetchall() {
 	return
     fi
 
-    execute fetch "http://svn.apache.org/repos/asf/qpid/trunk/qpid/java/management/common/src/main/" "qpid" 
-    execute fetch "http://svn.apache.org/repos/asf/harmony/enhanced/java/trunk/classlib/modules/auth/src/main/java/common/" "harmony" 
-    execute fetch "https://dnsjava.svn.sourceforge.net/svnroot/dnsjava/trunk" "dnsjava" 
-    execute gitfetch "git://kenai.com/jbosh~origin" "master" "jbosh" 
+    execute svnfetch "http://svn.apache.org/repos/asf/qpid/trunk/qpid/java/management/common/src/main/" "qpid"
+    execute svnfetch "http://svn.apache.org/repos/asf/harmony/enhanced/java/trunk/classlib/modules/auth/src/main/java/common/" "harmony" 
+    execute svnfetch "https://dnsjava.svn.sourceforge.net/svnroot/dnsjava/trunk" "dnsjava"
+    execute gitfetch "git://kenai.com/jbosh~origin" "master" "jbosh"
     # jldap doesn't compile with the latest version (missing deps?), therefore it's a fixed version for now
     #  execute gitfetch "git://git.openldap.org/openldap-jldap.git" "master" "novell-openldap-jldap"
     wait
@@ -91,42 +110,79 @@ createbuildsrc() {
   rm -rf build/src
   mkdir -p build/src/trunk
 
-  execute copyfolder "src/smack/source/" "build/src/trunk" "." 
-  execute copyfolder "src/qpid/java" "build/src/trunk" "org/apache/qpid/management/common/sasl" 
-  execute copyfolder "src/novell-openldap-jldap" "build/src/trunk" "." 
-  execute copyfolder "src/dnsjava"  "build/src/trunk" "org" 
-  execute copyfolder "src/harmony" "build/src/trunk" "." 
-  execute copyfolder "src/jbosh/src/main/java" "build/src/trunk" "." 
+  execute copyfolder "src/smack/source/" "build/src/trunk" "."
+  execute copyfolder "src/qpid/java" "build/src/trunk" "org/apache/qpid/management/common/sasl"
+  execute copyfolder "src/novell-openldap-jldap" "build/src/trunk" "."
+  execute copyfolder "src/dnsjava"  "build/src/trunk" "org"
+  execute copyfolder "src/harmony" "build/src/trunk" "."
+  execute copyfolder "src/jbosh/src/main/java" "build/src/trunk" "."
   if $BUILD_JINGLE ; then
-    execute copyfolder "src/smack/jingle/extension/source/" "build/src/trunk" "." 
+    execute copyfolder "src/smack/jingle/extension/source/" "build/src/trunk" "."
   fi
   wait
   # custom overwrites some files from smack, so this has to be done as last
-  copyfolder "src/custom" "build/src/trunk" "." 
+  copyfolder "src/custom" "build/src/trunk" "."
 }
 
 patchsrc() {
-  echo "## Step 25: patch build/src"
-  cd "${ASMACK_BASE}"
-  (
-    cd build/src/trunk/
+    echo "## Step 25: patch build/src"
+    cd ${ASMACK_BASE}/build/src/trunk/
     for PATCH in `(cd "../../../${1}" ; find -maxdepth 1 -type f)|sort` ; do
-      if echo $PATCH | grep '\.sh$'; then
-        if [ -f "../../../${1}/$PATCH" ]; then "../../../${1}/$PATCH" || exit 1 ; fi
-      fi
-      if echo $PATCH | grep '\.patch$'; then
-        if [ -f "../../../${1}/$PATCH" ]; then patch -p0 < "../../../${1}/$PATCH" || exit 1 ; fi
-      fi
+	echo $PATCH
+	if [[ $PATCH == *.sh ]]; then
+	    "../../../${1}/$PATCH" || exit 1
+	elif [[ $PATCH == *.patch ]]; then
+	    patch -p0 < "../../../${1}/$PATCH" || exit 1
+	fi
     done
-  )
 }
 
 build() {
   echo "## Step 30: compile"
-  ant -Dbuild.all=true $JINGLE_ARGS
+  buildandroid
   if [ $? -ne 0 ]; then
-      exit
+      exit 1
   fi
+}
+
+buildandroid() {
+    local sdklocation
+    local version
+    local sdks
+
+    cd $ASMACK_BASE
+
+    if [ ! -f local.properties ] ; then
+	echo "Could not find local.properties file"
+	echo "See local.properties.example"
+	exit 1
+    fi
+
+    sdklocation=$(grep sdk-location local.properties| cut -d= -f2)
+    if [ -z "$sdklocation" ] ; then
+	echo "Android SDK not found. Don't build android version"
+	exit 1
+    fi
+    for f in ${sdklocation/\$\{user.home\}/$HOME}/platforms/* ; do
+	version=`basename $f`
+	if [[ "$version" != android-* ]] ; then
+	    echo "$sdklocation contains no Android SDKs"
+	    exit 1
+	fi
+	if [ ${version#android-} -gt 5 ] ; then
+	    echo "Building for ${version}"
+	    sdks="${sdks} ${version}\n"
+	fi
+
+    done
+    if [ -z "${sdks}" ] ; then
+	echo "No SDKs found"
+	exit 1
+    fi
+    if echo -e ${sdks} | \
+	xargs -I{} -n 1 $XARGS_ARGS ant -Dandroid.version={} -Djar.suffix="${1}" compile-android ; then
+	exit 1
+    fi
 }
 
 buildcustom() {
@@ -138,7 +194,10 @@ buildcustom() {
       JINGLE_ARGS="-Djingle=lib/jstun.jar"
     fi
     patchsrc "${dir}"
-    ant -Djar.suffix=`echo ${dir}|sed 's:patch/:-:'` $JINGLE_ARGS
+    local custom
+    custom=$(echo ${dir} | sed 's:patch/:-:')
+    ant -Djar.suffix="${custom}" $JINGLE_ARGS
+    buildandroid "${custom}"
   done
 }
 
@@ -153,6 +212,7 @@ parseopts() {
 		;;
 	    d)
 		set -x
+		XARGS_ARGS="-t"
 		;;
 	    j)
 		BUILD_JINGLE=true
@@ -237,7 +297,7 @@ execute() {
 setdefaults() {
 # Default configuration
     SMACK_REPO=git://github.com/Flowdalic/smack.git
-    SMACK_BRANCH=master
+    SMACK_BRANCH=origin/master
     SMACK_LOCAL=false
     UPDATE_REMOTE=true
     BUILD_CUSTOM=false
@@ -257,7 +317,7 @@ parseconfig() {
 
 setconfig() {
     if [ ${PARALLEL_BUILD} == "true" ]; then
-	XARGS_ARGS="-P4"
+	XARGS_ARGS="${XARGS_ARGS} -P4"
 	BACKGROUND="true"
     else
 	XARGS_ARGS=""
@@ -298,7 +358,7 @@ if $BUILD_CUSTOM; then
     buildcustom
 fi
 
-if $(cmdExists advzip); then
+if cmdExists advzip ; then
   echo "advzip found, compressing files"
   find build \( -name '*.jar' -or -name '*.zip' \) -print0 | xargs -n 1 -0 $XARGS_ARGS advzip -z4 
 else
